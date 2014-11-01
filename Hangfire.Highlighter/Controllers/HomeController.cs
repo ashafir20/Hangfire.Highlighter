@@ -33,30 +33,49 @@ namespace Hangfire.Highlighter.Controllers
         [HttpPost]
         public ActionResult Create([Bind(Include="SourceCode")] CodeSnippet snippet)
         {
-            try
+            if (ModelState.IsValid)
             {
-                if (ModelState.IsValid)
+                snippet.CreatedAt = DateTime.UtcNow;
+
+                _db.CodeSnippets.Add(snippet);
+                _db.SaveChanges();
+
+                using (StackExchange.Profiling.MiniProfiler.StepStatic("Job enqueue"))
                 {
-                    snippet.CreatedAt = DateTime.UtcNow;
-
-                    using (StackExchange.Profiling.MiniProfiler.StepStatic("Service call"))
-                    {
-                        snippet.HighlightedCode = HighlightSource(snippet.SourceCode);
-                        snippet.HighlightedAt = DateTime.UtcNow;
-                    }
-
-                    _db.CodeSnippets.Add(snippet);
-                    _db.SaveChanges();
-
-                    return RedirectToAction("Details", new { id = snippet.Id });
+                    // Enqueue a job
+                    BackgroundJob.Enqueue(() => HighlightSnippet(snippet.Id));
                 }
-            }
-            catch (HttpRequestException)
-            {
-               ModelState.AddModelError("", "Highlighting service returned error. Try again later.");
+
+                return RedirectToAction("Details", new { id = snippet.Id });
             }
 
             return View(snippet);
+        }
+
+        /*
+        Process a job (code snippet highlighting) in the background
+        Please, note that user still waits until its source code will be highlighted. But the application
+        itself became more responsive and he is able to do another things while background job is being processed.
+         */
+        public static void HighlightSnippet(int snippetId)
+        {
+            using (var db = new HighlighterDbContext())
+            {
+                var snippet = db.CodeSnippets.Find(snippetId);
+
+                if (snippet == null) return;
+
+                snippet.HighlightedCode = HighlightSource(snippet.SourceCode);
+                snippet.HighlightedAt = DateTime.UtcNow;
+
+                db.SaveChanges();
+            }
+        }
+
+
+        private static string HighlightSource(string source)
+        {
+            return RunSync(() => HighlightSourceAsync(source));
         }
 
         private static async Task<string> HighlightSourceAsync(string source)
@@ -78,15 +97,11 @@ namespace Hangfire.Highlighter.Controllers
             }
         }
 
-        private static string HighlightSource(string source)
-        {
-            return RunSync(() => HighlightSourceAsync(source));
-        }
-
         private static TResult RunSync<TResult>(Func<Task<TResult>> func)
         {
             return Task.Run<Task<TResult>>(func).Unwrap().GetAwaiter().GetResult();
         }
+
 
         protected override void Dispose(bool disposing)
         {
